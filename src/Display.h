@@ -19,7 +19,7 @@ class Display {
     Display() {}
 
     void init(byte contrast);
-    void initSoftSPI(byte contrast);
+    void initI2C(byte contrast);
     void writeCommand(byte command);
     void writeData(byte data);
     void resetRamAddress(void);

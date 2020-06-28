@@ -3,7 +3,7 @@
 #include "Display.h"
 #include "globals.h"
 
-#define VERSION 2
+#define VERSION 3
 #define ENABLE_OLED 1 
 #define OLED_REFRESH_MS 100
 
@@ -14,6 +14,18 @@ OLD CARS ECU throttle & cruise combined
 This sketch can be used to control a BMW cruise throttle actuator (BMW/VDO "8 369 027" / "408.201/013/001") over CAN and will also handle the cruise part (speed signal, buttons, cruise state). 
 based on: https://github.com/Lukilink/actuator_ECU
 
+COMPONENTS:
+- ARDUINO MEGA 2560 R3
+- MCP2551 module
+- L298N H-Bridge module
+- 0.96"/1.3" 128x64 OLED DISPLAY I2C
+- 3+ Button Keypad (e.g. https://www.amazon.de/gp/product/B079JWDQBW)
+- 1x ODB Female Port (e.g. https://www.amazon.de/gp/product/B07TZMXQLK)
+- 3x DB9 Connectors Female
+- 1x 30mm 5V Fan
+
+
+
 RETROPILOT 2560 ECU PINOUT:
 
 DB9 1 / BOTTOM
@@ -23,7 +35,7 @@ ACTUATOR 2 black			DB9 2			L298 OUT3
 ACTUATOR 3 yellow			DB9 3			L298 OUT4
 ACTUATOR 4 red				DB9 4			L298 OUT1
 SPD_SENSOR GND				DB9 5			GND
-ACTUATOR 6 grey				DB9 6			RES1KOHM / A3
+ACTUATOR 6 grey				DB9 6			RES1KOHM (connect 1k resistor from this line to GND) / A3
 ACTUATOR 7 white			DB9 7			(ARDUINO) +5V
 SPD_SENSOR +5V				DB9 8			(ARDUINO) +5V
 SPD_SENSOR SIGNAL			DB9 9			ARDUINO 18
@@ -43,15 +55,15 @@ BRAKE / HALL		  DB9 8			ARDUINO 47
 
 DB9 3 / TOP
 
-CAN1 L 				DB9 1			MCP CAN L 	--> used to connect angle sensor, steering mcu and RADAR 3
-CAN1 H 				DB9 2			MCP CAN H	--> used to connect angle sensor, steering mcu and RADAR 2
-CAN2 L 				DB9 3			OBD 11		--> RADAR 11
-CAN2 H 				DB9 4			OBD 3		--> RADAR 6
+CAN1 L 				DB9 1			MCP CAN L 	  PANDA OBD 14  --> db9 1 used to connect  STEERING ANGLE SENSOR, steering mcu and TSS RADAR 3
+CAN1 H 				DB9 2			MCP CAN H	    PANDA OBD 6   --> db9 2 used to connect  STEERING ANGLE SENSOR, steering mcu and TSS RADAR 2
+CAN2 L 				DB9 3			PANDA OBD 11		            --> db9 3 used to connect TSS RADAR 11
+CAN2 H 				DB9 4			PANDA OBD 3		              --> db9 4 used to connect TSS RADAR 6
 
-STEERING +12V		DB9 6			+12V
-STEERING +12V		DB9 7			+12V
-STEERING GND		DB9 8			GND
-STEERING GND		DB9 9			GND
+STEERING +12V		DB9 6			+12V  -> RADAR, EPS, STEERING ANGLE SENSOR
+STEERING +12V		DB9 7			+12V  -> RADAR, EPS, STEERING ANGLE SENSOR
+STEERING GND		DB9 8			GND   -> RADAR, EPS, STEERING ANGLE SENSOR
+STEERING GND		DB9 9			GND   -> RADAR, EPS, STEERING ANGLE SENSOR
 
 
 L298
@@ -78,17 +90,8 @@ CAN H				  OBD 6
 CAN L				  OBD 14
 
 
-OPTION: 1.3 OLED DISPLAY (soft spi)
 
-PIN_OLED_RES 		ARDUINO 30
-PIN_OLED_DC 		ARDUINO 31
-PIN_OLED_CS 		ARDUINO 32
-PIN_OLED_CLK 		ARDUINO 33
-PIN_OLED_DIN 		ARDUINO 34
-PIN_OLED_VCC		(ARDUINO) +5V
-PIN_OLED_GND		(ARDUINO) GND
-
-OPTION: 0.96 OLED DISPLAY (scl/sda)
+0.96/1.3 128x64 OLED DISPLAY (scl/sda)
 
 PIN_OLED_SCL 		ARDUINO 21
 PIN_OLED_SDA 		ARDUINO 20
@@ -97,10 +100,11 @@ PIN_OLED_GND		(ARDUINO) GND
 
 
 OBD2 PANDA CONNECTOR
-
+OBD 3				      DB9-3 4 -> TSS RADAR 6
 ODB 4				      GND
 OBD 6				      MCP CAN H
 OBD 8 (Ignition)	+12V
+OBD 11				    DB9-3 3 -> TSS RADAR 11
 OBD 14				    MCP CAN L
 OBD 16 (+12V)		  +12V
 */
@@ -134,9 +138,9 @@ const int VSS_HALL_SENSOR_INTERRUPT_PIN = 18;
 
 
 // VSS SENSOR
-const float VSS_DISTANCE_PER_REVOLUTION=0.50f; // 50 cm per sensor revolution
+const float VSS_DISTANCE_PER_REVOLUTION=0.475; // measured 47.5cm per sensor revolution
 
-const int VSS_RINGBUFFER_SIZE = 20;
+const int VSS_RINGBUFFER_SIZE = 10;
 const int VSS_REFRESH_RATE_MS = 50;
 float vssRingBuffer[VSS_RINGBUFFER_SIZE];
 float vssSpeedKMH=0;
@@ -165,11 +169,11 @@ const int ACTUATOR_POT_REFERENCE_RESISTOR = 1000; // we measure the resistance o
 
 const int SLOW_MOVE_ERROR_THRESHOLD=100; // this defines the error threshold from which on we will use the below defined PWM to move the actuator smoother towards the setpoint
 const int SLOW_MOVE_PWM_PULL=225;   // when <100 ohms short of setpoint, use these arduino PWM for the driver (pull needs more force!)
-const int SLOW_MOVE_PWM_LOOSEN=180; // when <100 ohms above setpoint, use these arduino PWM for the driver
+const int SLOW_MOVE_PWM_LOOSEN=127; // when <100 ohms above setpoint, use these arduino PWM for the driver
 
 const unsigned int ACTUATOR_RAMP_UP_MS=400; // the "pull" time for which duty cycling is active
 const unsigned int ACTUATOR_RAMP_DOWN_MS=300; // the "loosen" time for which duty cycling is active
-const int ACTUATOR_DUTY_CYCLE_LENGTH_MS=50; // each complete cycle is 50 ms
+const int ACTUATOR_DUTY_CYCLE_LENGTH_MS=20; // each complete cycle is 20 ms
 const int ACTUATOR_RAMP_UP_INITIAL_DUTY=25; // pull initial duty in % 
 const int ACTUATOR_RAMP_DOWN_INITIAL_DUTY=15; // loosen initial duty in %
 const int ACTUATOR_RAMP_UP_PER_CYCLE_DUTY=10; // pull duty-per-cycle increment after each completed cycle in absolute percent
@@ -187,7 +191,6 @@ float GAS_CMD1 = 0;
 boolean cancelGasActuation = false;
 
 // brake variables
-
 float BRAKE_CMD=0;
 float BRAKE_CMD1=0;
 float BRAKE_CMD_PERCENT=0;
@@ -264,6 +267,8 @@ unsigned long canMessagesCurrentSecondMillis=0;
 unsigned long lastMainLoop=0;
 unsigned long lastMainLoopCurrentSecondMillis=0;
 
+unsigned int vssTotalSensorRevolutions=0;
+
 int lastMainLoopPerSecond=0; // tracks the number of loops() processed per second. target is around 500/s (if can network is active!)
 int lastMainLoopCurrentSecond=0;
   
@@ -328,9 +333,10 @@ void startActuation(int mTargetPosition) {
   if (mTargetPosition>ACTUATOR_MAX_POT) mTargetPosition=ACTUATOR_MAX_POT;
 
   // within ACTUATOR_ALLOWED_PERM_ERROR, stop this actuation sequence
-  if (abs(actuatorPotiPosition - mTargetPosition) < ACTUATOR_ALLOWED_PERM_ERROR)
-    actuatorTargetPosition=mTargetPosition;
+  if (abs(actuatorPotiPosition - mTargetPosition) < ACTUATOR_ALLOWED_PERM_ERROR) {
+    actuatorTargetPosition=mTargetPosition; 
     return stopActuation();
+  }
 
   // continue current actuation, just update endpoint
   if (mTargetPosition>actuatorPotiPosition && actuatorDirection==1) {
@@ -349,7 +355,6 @@ void startActuation(int mTargetPosition) {
   else actuatorDirection=-1;
 
   actuatorDutyCycleStart=millis();
-
 }
 
 /**
@@ -484,14 +489,14 @@ void setupCruise() {
 
 void displayOled() {
   #if ENABLE_OLED
-  if (millis()-lastOledRefresh<OLED_REFRESH_MS && !DEBUGMODE)
+  if (millis()-lastOledRefresh<OLED_REFRESH_MS)
     return;
 
   lastOledRefresh=millis();
 
   if (isFirstRender) {
     lcd.clearVideoBuffer();
-    sprintf(msgString, "RetroPilot V%d -", VERSION);
+    sprintf(msgString, "RetroPilot V%d ", VERSION);
     lcd.drawString(0, 0, msgString);
     lcd.drawLine(0,12,128,12);    
  
@@ -508,13 +513,13 @@ void displayOled() {
     else if (NO_CLUCH_BRAKE_MODE)
       lcd.drawString(93, 0, "UNSAFE");
     else {
-      sprintf(msgString, "%d", (int)(millis()/1000));  
-      lcd.drawString(95, 0, msgString);
+      sprintf(msgString, "%d", (int)(vssTotalSensorRevolutions));  
+      lcd.drawString(87, 0, msgString);
     }
   }
 
   if (subOledRefresh==1) {
-    sprintf(msgString, "ON:%d S:%-3d GAS:%3d%%   ", OP_ON, ccSetSpeed, (int)GAS_CMD_PERCENT);
+    sprintf(msgString, "O:%d C:%-3d V:%-3d G:%3d%%   ", OP_ON, ccSetSpeed, (int)vssAvgSpeedKMH, ((int)GAS_CMD_PERCENT));
     lcd.drawString(0, 15, msgString);
   }
 
@@ -546,9 +551,10 @@ void displayOled() {
 
 
 void setup() {
+  delay(2000);
 
   #if ENABLE_OLED
-  lcd.initSoftSPI(100);
+  lcd.initI2C(100);
   lcd.clearVideoBuffer();
   lcd.drawString(10, 10, "Starting RetroPilot 2560...");
   lcd.show();
@@ -580,6 +586,7 @@ void setup() {
   CAN.init_Mask(0, 0, 0x3ff);
   CAN.init_Mask(1, 0, 0x3ff);
   CAN.init_Filt(0, 0, 0x200);
+  CAN.init_Filt(1, 0, 0x343);
   
 
   setupThrottle();
@@ -632,10 +639,11 @@ void loopUpdateVssSensor() {
       noInterrupts();
       byte tmpVssSensorRevolutions=vssSensorRevolutions;
       vssLastUnhandledTriggerMicros=vssLastTriggerMicros;
+      vssSensorRevolutions -= tmpVssSensorRevolutions;
       SREG = SaveSREG;
 
-      vssSpeedKMH = tmpVssSensorRevolutions * (VSS_DISTANCE_PER_REVOLUTION / (vssDuration * 0.000001)) * 3600;
-      vssSensorRevolutions -= tmpVssSensorRevolutions;
+      vssSpeedKMH = tmpVssSensorRevolutions * (VSS_DISTANCE_PER_REVOLUTION / (vssDuration * 0.000001)) * 3.6;
+      vssTotalSensorRevolutions += tmpVssSensorRevolutions;
   }
   else if (micros()-vssLastUnhandledTriggerMicros>1000L*1000L) { // 1 second without hall signal is interpreted as standstill
     vssSpeedKMH=0;
@@ -645,6 +653,7 @@ void loopUpdateVssSensor() {
     lastVssRefresh=millis();
     vssSpeedSum-=vssRingBuffer[vssRingBufferIndex];
     vssSpeedSum+=vssSpeedKMH;
+
     vssRingBuffer[vssRingBufferIndex]=vssSpeedKMH;
     vssRingBufferIndex++;
     if (vssRingBufferIndex>=VSS_RINGBUFFER_SIZE)
@@ -838,7 +847,8 @@ void loopCruiseButtons() {
   }
 
   if (DEBUGMODE && buttonstate2==LOW) {
-      startActuation(actuatorTargetPosition-20);
+      startActuation(actuatorTargetPosition-50);
+      delay(10);
   }
 
   if (buttonstate3==LOW && debounceTime3!=0 && (millis()-debounceTime3>=50L || millis()<debounceTime3)) {
@@ -851,7 +861,8 @@ void loopCruiseButtons() {
 
 
   if (DEBUGMODE && buttonstate3==LOW) {
-    startActuation(actuatorTargetPosition+20);
+    startActuation(actuatorTargetPosition+50);
+    delay(10);
   }
 }
 
