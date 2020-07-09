@@ -138,20 +138,26 @@ const int VSS_HALL_SENSOR_INTERRUPT_PIN = 18;
 
 
 // VSS SENSOR
-const float VSS_DISTANCE_PER_REVOLUTION=0.475; // measured 47.5cm per sensor revolution
+#define VSS_SENSOR_SMOOTHING 3    // 0 = just ringbuffer*refresh rate smoothing (e.g. over 800ms). highest response rate for reliable sensors 
+                                  // 1 = in addition to 0 accounts for debounce effects of the sensor (additional, invalid signals) by limiting the change rate to 10kmh / REFRESH_RATE, e.g. 50kmh/s
+                                  // 2 = assumes the sensor might lose revolutions at higher speeds (measures the maximum speed (shortest revolution time) for each refresh rate cycle) 
+                                  // 3 = in addition to 2 accounts for debounce effects of the sensor (additional, invalid signals) by limiting the change rate to 10kmh / REFRESH_RATE, e.g. 50kmh/s
+#define VSS_MAX_SPEED 160.0f    // the maximum speed in kmh handled by the ECU in smoothing mode 1 & 2
+#define VSS_DISTANCE_PER_REVOLUTION 0.525f // 52.5cm driving distance per sensor revolution
 
-const int VSS_RINGBUFFER_SIZE = 10;
-const int VSS_REFRESH_RATE_MS = 50;
+const int VSS_RINGBUFFER_SIZE = 4;
+const int VSS_REFRESH_RATE_MS = 200;
 float vssRingBuffer[VSS_RINGBUFFER_SIZE];
 float vssSpeedKMH=0;
 float vssSpeedSum=0;
 float vssAvgSpeedKMH=0;
+float lastValidVssSpeedKMH=0;
+
 int vssRingBufferIndex=0;
 
-
 unsigned long vssDuration=0;
-
 unsigned long lastVssRefresh=0;
+unsigned long lastValidVssSpeedTs=0;
 
 volatile byte vssSensorRevolutions=0;
 volatile unsigned long vssLastTriggerMicros=0;
@@ -171,13 +177,13 @@ const int SLOW_MOVE_ERROR_THRESHOLD=100; // this defines the error threshold fro
 const int SLOW_MOVE_PWM_PULL=225;   // when <100 ohms short of setpoint, use these arduino PWM for the driver (pull needs more force!)
 const int SLOW_MOVE_PWM_LOOSEN=127; // when <100 ohms above setpoint, use these arduino PWM for the driver
 
-const unsigned int ACTUATOR_RAMP_UP_MS=400; // the "pull" time for which duty cycling is active
-const unsigned int ACTUATOR_RAMP_DOWN_MS=300; // the "loosen" time for which duty cycling is active
+const unsigned int ACTUATOR_RAMP_UP_MS=500; // the "pull" time for which duty cycling is active
+const unsigned int ACTUATOR_RAMP_DOWN_MS=400; // the "loosen" time for which duty cycling is active
 const int ACTUATOR_DUTY_CYCLE_LENGTH_MS=20; // each complete cycle is 20 ms
-const int ACTUATOR_RAMP_UP_INITIAL_DUTY=25; // pull initial duty in % 
-const int ACTUATOR_RAMP_DOWN_INITIAL_DUTY=15; // loosen initial duty in %
-const int ACTUATOR_RAMP_UP_PER_CYCLE_DUTY=10; // pull duty-per-cycle increment after each completed cycle in absolute percent
-const int ACTUATOR_RAMP_DOWN_PER_CYCLE_DUTY=15; // loosen duty-per-cycle increment after each completed cycle in absolute percent
+const int ACTUATOR_RAMP_UP_INITIAL_DUTY=10; // pull initial duty in % 
+const int ACTUATOR_RAMP_DOWN_INITIAL_DUTY=10; // loosen initial duty in %
+const int ACTUATOR_RAMP_UP_PER_CYCLE_DUTY=4; // pull duty-per-cycle increment after each completed cycle in absolute percent
+const int ACTUATOR_RAMP_DOWN_PER_CYCLE_DUTY=5; // loosen duty-per-cycle increment after each completed cycle in absolute percent
 
 int actuatorDirection=0;
 unsigned long actuatorDutyCycleStart=0;
@@ -630,9 +636,16 @@ void setup() {
   displayOled();
 }
 
-
+/**
+ * This function is called each loop and determines the current vssAvgSpeedKMH.
+ * It measures the exact micros elapsed between the last handled hall sensor trigger and the latest trigger [interrupt driven].
+ * The duration is is used to determine the highest current speed within each VSS_REFRESH_RATE_MS interval 
+ * (highest speed because at high frequencies, the hall sensor sometimes loses revolutions [capacitance?] so we use the biggest indiviual speed)
+ * The speed is averaged for VSS_RINGBUFFER_SIZE*VSS_REFRESH_RATE_MS (< 1s)
+ * */
 void loopUpdateVssSensor() {
-  if (vssSensorRevolutions>0) {
+  #if VSS_SENSOR_SMOOTHING==0 || VSS_SENSOR_SMOOTHING==1
+    if (vssSensorRevolutions>0) {
 
       vssDuration = (micros() - vssLastUnhandledTriggerMicros);
       uint8_t SaveSREG = SREG;
@@ -643,18 +656,53 @@ void loopUpdateVssSensor() {
       SREG = SaveSREG;
 
       vssSpeedKMH = tmpVssSensorRevolutions * (VSS_DISTANCE_PER_REVOLUTION / (vssDuration * 0.000001)) * 3.6;
+      #if VSS_SENSOR_SMOOTHING==1
+        vssSpeedKMH=max(min(vssSpeedKMH, vssAvgSpeedKMH+10), vssAvgSpeedKMH-10);
+      #endif
       vssTotalSensorRevolutions += tmpVssSensorRevolutions;
-  }
-  else if (micros()-vssLastUnhandledTriggerMicros>1000L*1000L) { // 1 second without hall signal is interpreted as standstill
-    vssSpeedKMH=0;
-  }
+    }
+    else if (micros()-vssLastUnhandledTriggerMicros>1000L*1000L) { // 1 second without hall signal is interpreted as standstill
+      vssSpeedKMH=0;
+    }
+  #elif VSS_SENSOR_SMOOTHING==2 || VSS_SENSOR_SMOOTHING==3
+    if (vssSensorRevolutions>0) {
+        vssDuration = (vssLastTriggerMicros - vssLastUnhandledTriggerMicros);
+        uint8_t SaveSREG = SREG;
+        noInterrupts();
+        byte tmpVssSensorRevolutions=vssSensorRevolutions;
+        vssLastUnhandledTriggerMicros=vssLastTriggerMicros;
+        vssSensorRevolutions -= tmpVssSensorRevolutions;
+        SREG = SaveSREG;
+
+        float tmpSpeedKMH = tmpVssSensorRevolutions * (VSS_DISTANCE_PER_REVOLUTION / (vssDuration * 0.000001)) * 3.6;
+        if (tmpSpeedKMH<=VSS_MAX_SPEED) // we cap the speed we measure to max. 150km/h (max. OP speed) because sometimes at high frequencies the hall sensor might bounce and produce incorrect, way too high readings
+          vssSpeedKMH = max(vssSpeedKMH, tmpSpeedKMH);
+        #if VSS_SENSOR_SMOOTHING==3
+          vssSpeedKMH=max(min(vssSpeedKMH, vssAvgSpeedKMH+10), vssAvgSpeedKMH-10);
+        #endif
+        vssTotalSensorRevolutions += tmpVssSensorRevolutions;
+    }
+    else if (micros()-vssLastUnhandledTriggerMicros>1000L*1000L) { // 1 second without hall signal is interpreted as standstill
+      vssSpeedKMH=0;
+    }
+  #endif
 
   if (millis()-lastVssRefresh>=VSS_REFRESH_RATE_MS) {
     lastVssRefresh=millis();
+    
+    // this allows us to measure accurate low speeds (~1.5-8 km/h)
+    if (vssSpeedKMH>0) {
+      lastValidVssSpeedKMH=vssSpeedKMH;
+      lastValidVssSpeedTs=millis();
+    }
+    else if (vssSpeedKMH==0 && lastValidVssSpeedKMH>0 && millis()-lastValidVssSpeedTs<1000) {
+      vssSpeedKMH=lastValidVssSpeedKMH;
+    }
+
     vssSpeedSum-=vssRingBuffer[vssRingBufferIndex];
     vssSpeedSum+=vssSpeedKMH;
-
     vssRingBuffer[vssRingBufferIndex]=vssSpeedKMH;
+    vssSpeedKMH=0;
     vssRingBufferIndex++;
     if (vssRingBufferIndex>=VSS_RINGBUFFER_SIZE)
       vssRingBufferIndex=0;
