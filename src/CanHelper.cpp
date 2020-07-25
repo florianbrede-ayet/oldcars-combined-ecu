@@ -27,7 +27,6 @@
 */
 
 #include "CanHelper.h"
-#include "globals.h"
 
 
 uint32_t CanHelper::parseParameterBigEndianUnsignedLong(uint8_t *buffer, float paramOffset, float paramScale, uint8_t mostSignifcantBit, uint8_t size) {
@@ -122,13 +121,6 @@ void CanHelper::putParameterBigEndian(uint8_t *buffer, float value, float paramO
     uint32_t adjustedValue = (value-paramOffset)/paramScale;
     return putParameterBigEndianUnsignedLong(buffer, adjustedValue, mostSignifcantBit, size);
 }
-
-
-
-
-
-
-
 
 uint32_t CanHelper::parseParameterLittleEndianUnsignedLong(uint8_t *buffer, float paramOffset, float paramScale, uint8_t leastSignifcantBit, uint8_t size) {
     uint32_t returnValue=0;
@@ -225,6 +217,33 @@ void CanHelper::putParameterLittleEndian(uint8_t *buffer, float value, float par
     uint32_t adjustedValue = (value-paramOffset)/paramScale;
     return putParameterLittleEndianUnsignedLong(buffer, adjustedValue, leastSignifcantBit, size);
 }
+
+
+
+
+
+uint8_t CanHelper::calculateToyotaChecksum(uint8_t *buffer, uint16_t canTx) {
+  uint8_t len = 7;
+  uint8_t checksum = 0;
+  checksum = ((canTx & 0xFF00) >> 8) + (canTx & 0x00FF) + len + 1;
+  for (int ii = 0; ii < len; ii++) {
+    checksum += (buffer[ii]);
+  }
+  return checksum;
+}
+
+void CanHelper::putToyotaChecksum(uint8_t *buffer, uint16_t canTx) {
+  return putParameterBigEndian(buffer, calculateToyotaChecksum(buffer, canTx), 0, 1, 56, 8);
+}
+
+
+bool CanHelper::verifyToyotaChecksum(uint8_t *buffer, uint16_t canTx) {
+    uint8_t checksum = calculateToyotaChecksum(buffer, canTx);
+    if (checksum==buffer[7])
+        return true;
+    return false;
+}
+
 
 
 void CanHelper::printBitmask(uint8_t *buffer) {

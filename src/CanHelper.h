@@ -71,11 +71,7 @@
 #ifndef _CANHELPER_H_
 #define _CANHELPER_H_
 
-#if ARDUINO >= 100
-#include "Arduino.h"
-#else
-#include "WProgram.h"
-#endif
+#include <Arduino.h>
 
 
 #define MAX_PACKET_DEFINITIONS 10
@@ -88,6 +84,8 @@ class CanHelper {
     void putParameterBigEndianUnsignedLong(uint8_t *buffer, uint32_t value, uint8_t mostSignifcantBit, uint8_t size);
     void putParameterLittleEndianUnsignedLong(uint8_t *buffer, uint32_t value, uint8_t leastSignifcantBit, uint8_t size);
     
+    uint8_t calculateToyotaChecksum(uint8_t *buffer, uint16_t canTx);
+
   public:
     uint32_t parseParameterBigEndianUnsignedLong(uint8_t *buffer, float paramOffset, float paramScale, uint8_t mostSignifcantBit, uint8_t size);
     int32_t parseParameterBigEndianLong(uint8_t *buffer, float paramOffset, float paramScale, uint8_t mostSignifcantBit, uint8_t size);
@@ -115,7 +113,10 @@ class CanHelper {
     void putParameterLittleEndian(uint8_t *buffer, int32_t value, float paramOffset, float paramScale, uint8_t leastSignifcantBit, uint8_t size);
     void putParameterLittleEndian(uint8_t *buffer, float value, float paramOffset, float paramScale, uint8_t leastSignifcantBit, uint8_t size);
     
-    
+    void putToyotaChecksum(uint8_t *buffer, uint16_t canTx);
+    bool verifyToyotaChecksum(uint8_t *buffer, uint16_t canTx);
+
+
     void printBitmask(uint8_t *buffer);
     void bitRepresentation(uint32_t value, int8_t length);
     void resetBuffer(uint8_t *buffer);
